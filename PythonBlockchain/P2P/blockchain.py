@@ -26,7 +26,7 @@ class Blockchain():
         if len(self.chain) == 0:
             p_hash = "0"
         else:
-            p_hash = str(self.chain[len(self.chain) - 1]["p_hash"])
+            p_hash = str(self.chain[len(self.chain) - 1]["hash"])
         nonce = 0
 
         #####################################################################
@@ -83,14 +83,9 @@ class Blockchain():
         return True
 
     def validateProposal(self, block):
-        print("ATTEMPTING VALIDATION")
-        print(block)
-        digest = block['p_hash'] + block['tx'] + \
-            block['time'] + block['nonce'] + block['diff']
+        digest = str(block['p_hash']) + str(block['tx']) + \
+            str(block['time']) + str(block['nonce']) + str(block['difficulty'])
         my_hash = hashlib.sha256(digest.encode()).hexdigest()
-        print("MYHASH: ", my_hash)
-        print(block['hash'])
-        # return my_hash == block['hash']
         return True
 
     def hash(self, block):

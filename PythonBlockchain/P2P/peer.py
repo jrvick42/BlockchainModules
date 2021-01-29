@@ -8,6 +8,8 @@ import os
 from os import system, name
 from subprocess import call
 from datetime import datetime
+import traceback
+import pprint
 
 # Custom Imports
 from wallet import Wallet
@@ -85,7 +87,11 @@ class Peer():
                 print("6. Notifications", len(self.notifications))
                 print("7. Exit\n")
                 if res != "":
-                    print(res)
+                    if 'hash' in res:
+                        print("*** CURRENT BLOCKCHAIN ***\n")
+                        pprint.pprint(res)
+                    else:
+                        print(res)
                     print()
                 choice = input("Select: ")
 
@@ -131,7 +137,7 @@ class Peer():
 
                             amount = int(
                                 input("How much energy (kW) do you wish to sell: "))
-                            transaction = {'type': 'buy', 'amount': amount}
+                            transaction = {'type': 'sell', 'amount': amount}
                             if self.startTransaction(transaction):
                                 res = 'Transaction Completed'
                             else:
@@ -156,8 +162,7 @@ class Peer():
 
                 elif choice == '5':
 
-                    res = "*** Current Blockchain ***\n"
-                    res += str(self.blockchain.chain)
+                    res = str(self.blockchain.chain)
 
                 elif choice == '6':
 
@@ -190,7 +195,6 @@ class Peer():
                     "%H:%M:%S") + "\tInsufficient funds for this purchase")
                 return False
             else:
-                # TODO
                 # Create the block with the new transaction
                 self.blockchain.add_transaction(
                     str(self.profile['username']), 'Smart Grid', total_cost, transaction['amount'])
@@ -200,10 +204,11 @@ class Peer():
                 self.client.propose()
 
                 # Ensure we do not proceed until validation has been completed
-                while self.awaitingValidation:
-                    time.sleep(1)
+                while self.client.validationStatus():
+                        print("Client Awaiting Validation")
+                        time.sleep(1)
 
-                if self.validated:
+                if self.client.isValidated():
                     # If all is in order, Carry out the transaction
                     self.wallet.withdrawal(total_cost)
                     self.battery.deposit(transaction['amount'])
@@ -213,19 +218,34 @@ class Peer():
 
             return True
         elif transaction['type'] == 'sell':
-            # Check that the Peer has the power for the transaction
+            # Check that the Peer has the energy for the transaction
+            # NOTE: Hardcoded price
+            total_cost = transaction['amount'] * PRICE
             if transaction['amount'] > self.battery.getBalance():
                 self.notifications.append(datetime.now().strftime(
-                    "%H:%M:%S") + "\tNot enough power for this transaction")
+                    "%H:%M:%S") + "\tInsufficient energy for this transaction")
                 return False
             else:
-                # TODO
                 # Create the block with the new transaction
-                # Propose the block with the new transaction
+                self.blockchain.add_transaction(
+                    str(self.profile['username']), 'Smart Grid', total_cost, transaction['amount'])
+                self.blockchain.add_block()
 
-                # If all is in order, Carry out the transaction
-                self.wallet.deposit(total_cost * PRICE)
-                self.battery.withdrawal(transaction['amount'])
+                # Propose the block with the new transaction
+                self.client.propose()
+
+                # Ensure we do not proceed until validation has been completed
+                while self.client.validationStatus():
+                        print("Client Awaiting Validation")
+                        time.sleep(1)
+
+                if self.client.isValidated():
+                    # If all is in order, Carry out the transaction
+                    self.wallet.deposit(total_cost)
+                    self.battery.withdrawal(transaction['amount'])
+
+                self.validated = False
+                self.awaitingValidation = True
 
             return True
         else:
@@ -289,10 +309,7 @@ class PeerServer(threading.Thread):
                 msg = client.recv(4098).decode()
                 self.message_handler(client, msg)
             except Exception as e:
-                print("Error: ", e)
-                print("MSG: ", msg)
-                # client.send(
-                #     "Error receiving message. Please try again ...".encode())
+                print(str(type(e).__name__), e)
                 pass
 
     def message_handler(self, c, m):
@@ -312,9 +329,10 @@ class PeerServer(threading.Thread):
             # let the Peer know we are done
             c.send('added'.encode())
             time.sleep(0.1)
-
+            
+            new_contact = self.contacts.all()[list(self.contacts.all().keys())[-1]]
             self.notifications.append(
-                datetime.now().strftime("%H:%M:%S") + "\tNew contact has been added: %s" % self.contacts.all()[-1])
+                datetime.now().strftime("%H:%M:%S") + "\tNew contact has been added: %s" % new_contact)
 
         elif m == 'propose':
 
@@ -326,7 +344,6 @@ class PeerServer(threading.Thread):
             isValid = self.blockchain.validateProposal(block)
 
             if isValid:
-                print("IT WAS VALID")
                 c.send('valid'.encode())
             else:
                 c.send('not valid'.encode())
@@ -334,6 +351,9 @@ class PeerServer(threading.Thread):
 
             block = pickle.loads(c.recv(1024 * self.blockchain.length()))
             self.blockchain.appendBlock(block)
+            self.notifications.append(
+                datetime.now().strftime("%H:%M:%S") + "\tBlockchain has been updated!")
+
 
         else:
             res = m + " : Is not a valid request"
@@ -469,6 +489,11 @@ class PeerClient(threading.Thread):
 
     def propose(self):
 
+        # check if we are the only peer
+        if len(self.contacts.all().keys()) == 0:
+            self.validated = True
+            self.awaitingValidation = False
+
         votes_for = 0
 
         # Broadcast the proposal to all of the Peers for validation
@@ -483,27 +508,18 @@ class PeerClient(threading.Thread):
             response = self.sock.recv(1024).decode()
 
             if response == 'ready':
-                print("IN RESPONSE")
 
                 b = self.blockchain.get_last_block()
-                print(b)
-
-                # b = {"test": True}
 
                 self.sock.send(pickle.dumps(b))
                 time.sleep(0.1)
 
                 res = self.sock.recv(1024).decode()
 
-                # print("RES: ", res)
-
-                # print("RECVER FINISHED VALIDATION")
 
                 if res == 'valid':
-                    print("VALID++")
                     votes_for += 1
                 elif res == 'not valid':
-                    # print("NOTTTT VALIDDDDD")
                     self.notifications.append(datetime.now().strftime(
                         "%H:%M:%S") + "\tProposed block could not be verified by %s" % contact[0])
 
@@ -511,8 +527,6 @@ class PeerClient(threading.Thread):
 
         # Do we have enough votes to validate the block
         if votes_for == len(self.contacts.all().keys()):
-            # block is validated
-
             # send the verified block to each peer
             for key in self.contacts.all().keys():
                 contact = self.contacts.all()[str(key)]
@@ -524,6 +538,7 @@ class PeerClient(threading.Thread):
                 self.sock.close()
 
                 self.validated = True
+                self.awaitingValidation = False
 
             self.notifications.append(datetime.now().strftime(
                 "%H:%M:%S") + "\tBlock added successfully!")
@@ -536,6 +551,11 @@ class PeerClient(threading.Thread):
 
         self.awaitingValidation = False
 
+    def validationStatus(self):
+        return self.awaitingValidation
+
+    def isValidated(self):
+        return self.validated
 
 if __name__ == "__main__":
 
